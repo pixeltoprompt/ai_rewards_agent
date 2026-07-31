@@ -1,6 +1,6 @@
 # Rewards Agent
 
-An autonomous multi-agent system that evaluates drive-to-earn activity, checks it for plausibility, calculates rewards, manages inventory fallback, and dispatches personalized notifications — built with **LangGraph**, **LangChain**, and **CrewAI**.
+An autonomous multi-agent system that evaluates drive-to-earn activity, checks it for plausibility, calculates rewards, manages inventory fallback, and dispatches personalized notifications. Built with **LangGraph**, **LangChain**, and **CrewAI**.
 
 This is a reconstruction of a rewards-agent architecture I designed and built at a previous company, made runnable as a standalone, portfolio-friendly project. It runs fully offline out of the box (no API key required) and upgrades to live LLM generation the moment you add one.
 
@@ -84,6 +84,8 @@ python -m src.rewards_agent.api
 pytest tests/ -v
 ```
 
+
+
 ## Project structure
 
 ```
@@ -100,6 +102,8 @@ ai-rewards-agent/
 └── requirements.txt
 ```
 
+
+
 ## Design decisions worth knowing for a technical interview
 
 - **Output validation at node boundaries.** Every node writes a Pydantic-validated dict into state, not a raw LLM response. This is the fix for the most common agent-system failure mode: correct-looking output from one step silently breaking the next step's assumptions.
@@ -107,12 +111,16 @@ ai-rewards-agent/
 - **The fraud check never blocks on a live LLM call.** If CrewAI's underlying call fails for any reason (network, rate limit), `fraud_crew.py` falls back to the deterministic heuristic rather than crashing the whole reward flow — a graceful-degradation pattern, not a try/except that swallows the problem silently.
 - **Local-mock LLM mode is a design choice, not a shortcut.** It means this repo is a real, runnable demonstration of the orchestration logic for anyone reviewing it, with zero dependency on a paid API key — the same reason CI test suites shouldn't depend on live model calls either.
 
+
+
 ## What I'd add for a real production deployment
 
 - **LangSmith or Langfuse tracing** in place of the hand-rolled `trace` list, for replayable, queryable execution history.
 - **A proper vector-backed user-activity history** rather than an in-memory dict, to support richer eligibility rules (e.g., "flag if this week's activity deviates significantly from the user's 90-day baseline").
 - **RAGAS-style evaluation harness** for the fraud-reasoning LLM output, to catch generation-quality regressions before they reach users.
 - **Async/parallel execution** of `fraud_check` and `reward_calculator`, which are currently sequential for simplicity but don't actually depend on each other's output.
+
+
 
 ## License
 
