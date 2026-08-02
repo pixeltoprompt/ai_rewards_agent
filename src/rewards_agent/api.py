@@ -7,6 +7,8 @@ reusable outside an HTTP context (see run_demo.py).
 
 from __future__ import annotations
 
+import os
+
 from flask import Flask, jsonify, request
 
 from .graph import run_rewards_flow
@@ -49,4 +51,5 @@ def process_rewards():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() in ("1", "true", "yes")
+    app.run(debug=debug, port=5000)
