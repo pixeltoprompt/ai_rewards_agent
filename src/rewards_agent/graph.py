@@ -2,10 +2,16 @@
 The core agent graph: a LangGraph StateGraph implementing the drive-to-earn
 rewards flow described in the case study —
 
-    activity_checker -> eligibility_router -[eligible]-> reward_calculator
-                                            -[ineligible]-> reject_node
-    reward_calculator -> fraud_check -> inventory_check -> reward_dispatcher -> notifier
+    activity_checker -> eligibility_router -[eligible]-> reward_calculator ┐
+                                            -[ineligible]-> reject_node    ├-> inventory_check -> reward_dispatcher -> notifier
+                                            -[eligible]-> fraud_check      ┘
     inventory_check -[unavailable]-> substitute_reward -> reward_dispatcher
+
+`reward_calculator` and `fraud_check` each depend only on `state["activity"]`
+and write only their own state key, so they run as two parallel branches
+fanned out from `eligibility_check` and fanned back in at `inventory_check`
+(LangGraph's native superstep concurrency — see `build_graph()`), rather
+than one strictly after the other.
 
 Each node:
   1. Reads only the state keys it needs.
@@ -39,8 +45,16 @@ MAX_TRACE_STEPS = 20  # guards against runaway loops in the graph
 
 
 def _trace(state: AgentState, step: str) -> None:
-    state.setdefault("trace", [])
-    state["trace"].append(step)
+    """Records this node's step name.
+
+    `trace` is an `operator.add`-reduced channel (see schemas.py), so each
+    node contributes only its own single-item delta rather than mutating a
+    shared list in place — that's what makes it safe for `reward_calculator`
+    and `fraud_check` to write it concurrently in the same superstep instead
+    of racing on a shared list `.append()`. LangGraph concatenates every
+    node's delta for the step, in whatever order they complete.
+    """
+    state["trace"] = [step]
 
 
 # ---------------------------------------------------------------------------
@@ -80,14 +94,17 @@ def eligibility_check(state: AgentState) -> AgentState:
     return state
 
 
-def route_on_eligibility(state: AgentState) -> str:
-    """Conditional edge function — not a node itself. Returns the name of
-    the next node based on state, which is how LangGraph implements
-    branching."""
+def route_on_eligibility(state: AgentState) -> list[str]:
+    """Conditional edge function — not a node itself. Returns the name(s) of
+    the next node(s) based on state, which is how LangGraph implements
+    branching (and, for a list of more than one name, fan-out to parallel
+    branches within the same superstep — used here to dispatch to both
+    reward_calculator and fraud_check when eligible, since neither reads
+    the other's output)."""
     if state.get("error"):
-        return "reject"
+        return ["reject"]
     eligible = state.get("eligibility", {}).get("eligible", False)
-    return "eligible" if eligible else "reject"
+    return ["reward_calculator", "fraud_check"] if eligible else ["reject"]
 
 
 def reject_node(state: AgentState) -> AgentState:
@@ -117,7 +134,12 @@ def reward_calculator(state: AgentState) -> AgentState:
         tier_multiplier=multiplier,
         total_points=total,
     ).model_dump()
-    return state
+    # Runs in parallel with fraud_check_node (see build_graph()), so this
+    # returns only the keys it owns rather than the whole `state` object —
+    # two nodes in the same superstep can't both write the same LastValue
+    # channel (e.g. the unchanged `activity`/`eligibility` keys), even with
+    # identical values, without raising InvalidUpdateError.
+    return {"reward_calc": state["reward_calc"], "trace": state["trace"]}
 
 
 def fraud_check_node(state: AgentState) -> AgentState:
@@ -126,7 +148,9 @@ def fraud_check_node(state: AgentState) -> AgentState:
     activity = UserActivity(**state["activity"])
     result = run_fraud_check(activity)
     state["fraud_check"] = result.model_dump()
-    return state
+    # See the matching comment in reward_calculator: runs in parallel with
+    # it, so only this node's own keys are returned.
+    return {"fraud_check": state["fraud_check"], "trace": state["trace"]}
 
 
 def inventory_check(state: AgentState) -> AgentState:
@@ -234,14 +258,21 @@ def build_graph():
     graph.set_entry_point("activity_checker")
     graph.add_edge("activity_checker", "eligibility_check")
 
-    graph.add_conditional_edges(
-        "eligibility_check",
-        route_on_eligibility,
-        {"eligible": "reward_calculator", "reject": "reject"},
-    )
+    # route_on_eligibility returns a *list* of next-node names — LangGraph's
+    # add_conditional_edges dispatches to every node in that list within the
+    # same superstep, which is how the "eligible" path fans out to both
+    # reward_calculator and fraud_check as parallel branches instead of
+    # routing to a single next node. (path_map only supports single-string
+    # targets per key, so the fan-out has to come from the routing
+    # function's return value itself, not the path_map.)
+    graph.add_conditional_edges("eligibility_check", route_on_eligibility)
     graph.add_edge("reject", END)
 
-    graph.add_edge("reward_calculator", "fraud_check")
+    # Both parallel branches fan back in at inventory_check: a node with
+    # multiple incoming edges only runs once every incoming edge's source
+    # has completed, so inventory_check waits for both reward_calculator
+    # and fraud_check before it executes.
+    graph.add_edge("reward_calculator", "inventory_check")
     graph.add_edge("fraud_check", "inventory_check")
 
     graph.add_conditional_edges(

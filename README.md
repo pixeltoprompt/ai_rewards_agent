@@ -22,22 +22,25 @@ Most "AI agent" demos are a single LLM call with a tool attached. This project i
                  ┌─────────────┴─────────────┐
              eligible                    not eligible
                  │                             │
-      ┌──────────▼──────────┐        ┌─────────▼────────┐
-      │  reward_calculator    │        │   reject_node     │──▶ END
-      └──────────┬──────────┘        └────────────────────┘
-                 │
-      ┌──────────▼──────────┐
-      │   fraud_check         │  CrewAI plausibility analyst
-      │   (LangGraph node     │  (speed-vs-activity-type sanity check
-      │    wrapping a         │   + LLM-generated reviewer rationale)
-      │    CrewAI crew)       │
-      └──────────┬──────────┘
-                 │
-      ┌──────────▼──────────┐
-      │   inventory_check      │
-      └──────────┬──────────┘
-                 │
-     ┌───────────┼────────────────┐
+                 │  fan-out: run in   ┌────────▼──────────┐
+                 │  parallel branches │   reject_node      │──▶ END
+                 │  (same superstep)  └─────────────────────┘
+        ┌────────┴────────┐
+        │                 │
+┌───────▼──────────┐   ┌──▼───────────────────┐
+│ reward_calculator │   │   fraud_check          │  CrewAI plausibility analyst
+│                    │   │   (LangGraph node      │  (speed-vs-activity-type sanity check
+│                    │   │    wrapping a          │   + LLM-generated reviewer rationale)
+│                    │   │    CrewAI crew)        │
+└───────┬───────────┘   └──┬───────────────────┘
+        │                  │
+        └────────┬─────────┘
+                  │  fan-in: waits for both branches
+       ┌──────────▼──────────┐
+       │   inventory_check      │
+       └──────────┬──────────┘
+                  │
+     ┌────────────┼────────────────┐
  available    unavailable      flagged
      │             │                │
      │   ┌─────────▼────────┐  ┌────▼─────────────┐
@@ -118,7 +121,6 @@ ai-rewards-agent/
 - **LangSmith or Langfuse tracing** in place of the hand-rolled `trace` list, for replayable, queryable execution history.
 - **A proper vector-backed user-activity history** rather than an in-memory dict, to support richer eligibility rules (e.g., "flag if this week's activity deviates significantly from the user's 90-day baseline").
 - **RAGAS-style evaluation harness** for the fraud-reasoning LLM output, to catch generation-quality regressions before they reach users.
-- **Async/parallel execution** of `fraud_check` and `reward_calculator`, which are currently sequential for simplicity but don't actually depend on each other's output.
 
 
 
