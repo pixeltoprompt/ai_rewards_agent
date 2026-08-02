@@ -5,12 +5,15 @@ user. Run with: pytest -v
 """
 
 import sys
+import time
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import pytest  # noqa: E402
 
+from rewards_agent import graph as graph_module  # noqa: E402
 from rewards_agent.graph import run_rewards_flow  # noqa: E402
 from rewards_agent import mock_services as svc  # noqa: E402
 
@@ -67,6 +70,51 @@ def test_trace_is_ordered_and_non_empty():
     result = run_rewards_flow("user_004")
     assert len(result["trace"]) > 0
     assert result["trace"][0] == "activity_checker"
+
+
+def test_reward_calculator_and_fraud_check_both_run_for_eligible_user():
+    """reward_calculator and fraud_check now fan out as parallel branches
+    (see graph.py build_graph()), so LangGraph doesn't guarantee which one
+    completes first — assert both ran without assuming a strict order."""
+    result = run_rewards_flow("user_001")
+    assert {"reward_calculator", "fraud_check"}.issubset(set(result["trace"]))
+    assert result["reward_calc"] is not None
+    assert result["fraud_check"] is not None
+
+
+def test_reward_calculator_and_fraud_check_run_concurrently():
+    """Timing test: reward_calculator and fraud_check are fast, mocked, and
+    have no real latency by default, so this patches in an artificial
+    time.sleep on each to simulate the I/O-bound work they'd do against
+    real services. If they ran sequentially, total time would be roughly
+    the sum of both delays; run as parallel LangGraph branches, total time
+    should be much closer to a single delay than to their sum."""
+    delay = 0.4
+    original_reward_calculator = graph_module.reward_calculator
+    original_fraud_check_node = graph_module.fraud_check_node
+
+    def slow_reward_calculator(state):
+        time.sleep(delay)
+        return original_reward_calculator(state)
+
+    def slow_fraud_check_node(state):
+        time.sleep(delay)
+        return original_fraud_check_node(state)
+
+    with patch.object(graph_module, "reward_calculator", slow_reward_calculator), \
+            patch.object(graph_module, "fraud_check_node", slow_fraud_check_node):
+        start = time.time()
+        result = graph_module.run_rewards_flow("user_001")
+        elapsed = time.time() - start
+
+    assert result["dispatch"]["dispatched"] is True
+    # Sequential execution would take >= 2 * delay (0.8s here). Parallel
+    # execution should land much closer to a single delay (0.4s) plus the
+    # rest of the graph's own overhead.
+    sequential_lower_bound = 2 * delay
+    assert elapsed < sequential_lower_bound * 0.75, (
+        f"expected parallel execution well under {sequential_lower_bound:.2f}s, took {elapsed:.2f}s"
+    )
 
 
 if __name__ == "__main__":

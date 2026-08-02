@@ -11,7 +11,8 @@ immediate failure instead of a quiet, hard-to-debug one three steps later.
 
 from __future__ import annotations
 
-from typing import Literal, Optional, TypedDict
+import operator
+from typing import Annotated, Literal, Optional, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -83,5 +84,13 @@ class AgentState(TypedDict, total=False):
     fraud_check: Optional[dict]       # FraudCheckResult.model_dump()
     dispatch: Optional[dict]          # DispatchResult.model_dump()
     notification: Optional[dict]      # NotificationMessage.model_dump()
-    trace: list                       # ordered list of step names, for observability
+    # `reward_calculator` and `fraud_check` run as parallel branches (see
+    # graph.py) and both append to this list in the same superstep. A plain
+    # `list` field would race (LangGraph raises InvalidUpdateError when two
+    # nodes write the same LastValue channel in one step), so `trace` uses
+    # an `operator.add` reducer: each node returns only its own single-item
+    # delta (see `_trace()` in graph.py) and LangGraph concatenates the
+    # deltas from every node that ran in a given step, in whatever order
+    # they complete.
+    trace: Annotated[list, operator.add]  # ordered-per-branch list of step names, for observability
     error: Optional[str]              # set if a node hit an unrecoverable failure
